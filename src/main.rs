@@ -360,8 +360,6 @@ fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String) -> Resu
         }
     }
 
-    println!("[DEBUG] Selecting column_name: {}, column_type: {}", column_name, column_type.to_string());
-
     file.seek(SeekFrom::Start(0))?;
     let mut header = [0; 100];
     file.read_exact(&mut header)?;
@@ -373,8 +371,6 @@ fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String) -> Resu
     let mut page_header = [0; 8];
     (file).read_exact(&mut page_header)?;
     let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]) as u64;
-
-    println!("[DEBUG] table has {} rows", n_cells);
 
     let n_bytes = (n_cells * 2) as usize;
     let mut cell_array_contents = vec![0u8; n_bytes];
