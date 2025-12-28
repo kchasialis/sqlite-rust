@@ -1,3 +1,4 @@
+use std::fmt::format;
 use anyhow::{Result, bail, Context};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -349,7 +350,7 @@ fn get_table_count(file: &mut File, rootpage: u32) -> Result<u64> {
     Ok(n_cells)
 }
 
-fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String) -> Result<String> {
+fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String) -> Result<Vec<String>> {
     let mut col_idx = 0;
     let mut column_type: SqlType = SqlType::Null;
     for (idx, col) in tinfo.columns.iter().enumerate() {
@@ -404,7 +405,7 @@ fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String) -> Resu
         results.push(value);
     }
 
-    Ok(results.join("\n"))
+    Ok(results)
 }
 
 fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
@@ -425,14 +426,30 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
     }
 
     let select_regex = Regex::new(
-        r"(?i)SELECT\s+(\w+)\s+FROM\s+(\w+)"
+        r"(?i)SELECT\s+(.+?)\s+FROM\s+(\w+)"
     )?;
     if let Some(caps) = select_regex.captures(&*args[2]) {
-        let col_name = caps[1].to_string();
+        let cols_str = &caps[1];
         let table_name = caps[2].to_string();
+
+        let col_names: Vec<String> = cols_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+
         for tinfo in &tables_info {
             if tinfo.tbl_name.eq(&table_name) {
-                println!("{}", get_col_data(& mut file, tinfo, col_name)?);
+                let results: Vec<Vec<String>> = col_names
+                    .iter()
+                    .map(|col| get_col_data(&mut file, tinfo, col.clone()))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let n_rows = results[0].len();
+                for i in (0..n_rows) {
+                    let row_vec: Vec<&str> = results.iter().map(|col | col[i].as_str()).collect();
+                    println!("{}", row_vec.join("|"));
+                }
+
                 return Ok(());
             }
         }
