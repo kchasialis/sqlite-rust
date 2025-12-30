@@ -350,7 +350,7 @@ fn get_table_count(file: &mut File, rootpage: u32) -> Result<u64> {
     Ok(n_cells)
 }
 
-fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String) -> Result<Vec<String>> {
+fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String, filter_vec: Option<&Vec<bool>>) -> Result<Vec<String>> {
     let mut col_idx = 0;
     let mut column_type: SqlType = SqlType::Null;
     for (idx, col) in tinfo.columns.iter().enumerate() {
@@ -402,10 +402,43 @@ fn get_col_data(file: &mut File, tinfo: &TableInfo, column_name: String) -> Resu
             _ => bail!("Unsupported data type: {:?}", column_type)
         };
 
-        results.push(value);
+        if let Some(vec) = filter_vec {
+            if vec[i / 2] {
+                results.push(value);
+            }
+        } else {
+            results.push(value);
+        }
     }
 
     Ok(results)
+}
+
+fn get_filter_vec(file: &mut File, tinfo: &TableInfo, query: &str) -> Result<Vec<bool>> {
+    let where_re = Regex::new(r#"(?i)WHERE\s+(\w+)\s*=\s*['"]([^'"]+)['"]"#)?;
+
+    let n_rows = get_table_count(file, tinfo.rootpage)?;
+    let mut filter_vec = vec![true; n_rows as usize];
+
+    if let Some(caps) = where_re.captures(query) {
+        let filter_col = caps[1].to_string();
+        let filter_val = caps[2].to_string();
+
+        eprintln!("[DEBUG] filter_col: {}, filter_val: {}", filter_col, filter_val);
+
+        let mut unqualified_rows_dbg = 0;
+        let filter_col_data = get_col_data(file, tinfo, filter_col.clone(), None)?;
+        for (i, val) in filter_col_data.iter().enumerate() {
+            if !val.eq(&filter_val) {
+                filter_vec[i] = false;
+                unqualified_rows_dbg += 1;
+            }
+        }
+
+        eprintln!("[DEBUG] n_rows={}, qualified_rows={}", n_rows, n_rows - unqualified_rows_dbg)
+    }
+
+    Ok(filter_vec)
 }
 
 fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
@@ -415,7 +448,7 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
     let count_regex = Regex::new(
         r"(?i)SELECT\s+COUNT\s*\(\s*\*\s*\)\s+FROM\s+(\w+)"
     )?;
-    if let Some(caps) = count_regex.captures(&*args[2]) {
+    if let Some(caps) = count_regex.captures(&args[2]) {
         let table_name = caps[1].to_string();
         for table in &tables_info {
             if table.tbl_name.eq(&table_name) {
@@ -428,7 +461,7 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
     let select_regex = Regex::new(
         r"(?i)SELECT\s+(.+?)\s+FROM\s+(\w+)"
     )?;
-    if let Some(caps) = select_regex.captures(&*args[2]) {
+    if let Some(caps) = select_regex.captures(&args[2]) {
         let cols_str = &caps[1];
         let table_name = caps[2].to_string();
 
@@ -439,9 +472,11 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
 
         for tinfo in &tables_info {
             if tinfo.tbl_name.eq(&table_name) {
+                let filter_vec: Vec<bool> = get_filter_vec(&mut file, tinfo, &args[2])?;
+
                 let results: Vec<Vec<String>> = col_names
                     .iter()
-                    .map(|col| get_col_data(&mut file, tinfo, col.clone()))
+                    .map(|col| get_col_data(&mut file, tinfo, col.clone(), Some(&filter_vec)))
                     .collect::<Result<Vec<_>, _>>()?;
 
                 let n_rows = results[0].len();
