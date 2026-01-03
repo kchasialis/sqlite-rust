@@ -264,6 +264,8 @@ fn read_tbl_info(file: &mut File, cell_offset: u16) -> Result<TableInfo> {
     let rootpage_int = extract_integer(&record.data[3])? as u32;
     let sql_str = extract_string(&record.data[4]);
 
+    eprintln!("sql_str: {}", sql_str);
+
     Ok(TableInfo {
         tpe: type_str,
         name: name_str,
@@ -378,47 +380,6 @@ fn count_rows_in_page(file: &mut File, current_page: u32, page_size: u16) -> Res
 
 fn get_table_count(file: &mut File, tinfo: &TableInfo, page_size: u16) -> Result<u64> {
     count_rows_in_page(file, tinfo.rootpage, page_size)
-}
-
-fn check_if_primary_key(col: &Column) -> bool {
-    col.tpe == SqlType::Integer && col.name.to_lowercase() == "id"
-}
-
-fn has_integer_primary_key(tinfo: &TableInfo) -> bool {
-    if tinfo.columns.is_empty() {
-        return false;
-    }
-    check_if_primary_key(&tinfo.columns[0])
-}
-
-fn get_record_index(col_idx: usize, tinfo: &TableInfo) -> usize {
-    if has_integer_primary_key(tinfo) && col_idx > 0 {
-        col_idx - 1
-    } else {
-        col_idx
-    }
-}
-
-fn get_col_value(col_idx: usize, tinfo: &TableInfo, col_type: &SqlType, rowid: u64, record: &Record) -> Result<String> {
-    let is_primary_key = check_if_primary_key(&tinfo.columns[col_idx]);
-
-    Ok(if is_primary_key {
-        rowid.to_string()
-    } else {
-        let record_idx = get_record_index(col_idx, tinfo);
-        match col_type {
-            SqlType::Integer => {
-                extract_integer(&record.data[record_idx])?.to_string()
-            }
-            SqlType::Text => {
-                extract_string(&record.data[record_idx])
-            }
-            SqlType::Real => {
-                extract_real(&record.data[record_idx])?.to_string()
-            }
-            _ => bail!("Unsupported data type: {:?}", col_type)
-        }
-    })
 }
 
 fn get_page_data_with_filter(file: &mut File, col_idxs: &Vec<usize>, col_types: &Vec<SqlType>, page_size: u16, page_num: u32, filter_col: &Option<usize>, filter_val: &Option<String>) -> Result<Vec<Vec<String>>> {
@@ -640,20 +601,10 @@ fn get_index_page_data(file: &mut File, index_curr_page: u32, page_size: u16, in
     for i in (0..n_bytes).step_by(2) {
         let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
         let (record, _) = get_cell_data(file, page_offset, cell_offset, true)?;
-        let value = match index_col.tpe {
-            SqlType::Integer => {
-                extract_integer(&record.data[0])?.to_string()
-            }
-            SqlType::Text => {
-                extract_string(&record.data[0])
-            }
-            SqlType::Real => {
-                extract_real(&record.data[0])?.to_string()
-            }
-            _ => bail!("Unsupported index data type: {:?}",index_col.tpe)
-        };
+        let value = extract_string(&record.data[0]);
+        let rowid = extract_integer(&record.data[1])? as u64;
+
         if value.eq_ignore_ascii_case(index_val) {
-            let rowid = extract_integer(&record.data[1])? as u64;
             result.push(rowid);
         }
     }
@@ -718,6 +669,7 @@ fn get_cols_data_with_index(file: &mut File, tinfo: &TableInfo, page_size: u16, 
 fn find_index_root_page(tables_info: &[TableInfo], table_name: &str) -> Option<u32> {
     for entry in tables_info {
         if entry.tpe == "index" && entry.tbl_name == table_name {
+            eprintln!("Found index on {} for table: {}", entry.rootpage, table_name);
             return Some(entry.rootpage);
         }
     }
@@ -808,16 +760,18 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
                 tpe: SqlType::Text,
             };
 
-            columns = get_cols_data_with_index(&mut file, tinfo, page_size, &col_idxs, &col_types, index_root, &index_col, filter_val.unwrap().as_str())?;
+            let rows = get_cols_data_with_index(&mut file, tinfo, page_size, &col_idxs, &col_types, index_root, &index_col, filter_val.unwrap().as_str())?;
+            for row in rows {
+                println!("{}", row.join("|"));
+            }
         } else {
             columns = vec![Vec::new(); col_idxs.len()];
             get_cols_data_with_filter(&mut file, page_size, tinfo.rootpage, &col_idxs, &col_types, &filter_col, &filter_val, &mut columns)?;
-        }
-
-        let n_rows = columns[0].len();
-        for i in 0..n_rows {
-            let row_vec: Vec<&str> = columns.iter().map(|col| col[i].as_str()).collect();
-            println!("{}", row_vec.join("|"));
+            let n_rows = columns[0].len();
+            for i in 0..n_rows {
+                let row_vec: Vec<&str> = columns.iter().map(|col| col[i].as_str()).collect();
+                println!("{}", row_vec.join("|"));
+            }
         }
 
         return Ok(());
