@@ -264,7 +264,7 @@ fn read_tbl_info(file: &mut File, cell_offset: u16) -> Result<TableInfo> {
     let rootpage_int = extract_integer(&record.data[3])? as u32;
     let sql_str = extract_string(&record.data[4]);
 
-    eprintln!("sql_str: {}", sql_str);
+    // eprintln!("sql_str: {}", sql_str);
 
     Ok(TableInfo {
         tpe: type_str,
@@ -659,9 +659,9 @@ fn get_cols_data_with_index(file: &mut File, tinfo: &TableInfo, page_size: u16, 
     let mut rowids: Vec<u64> = vec![];
     get_rowids_index(file, index_rootpage, page_size, index_col, index_val, & mut rowids)?;
 
-    for rowid in &rowids {
-        eprintln!("[DEBUG] found rowid: {}", rowid);
-    }
+    // for rowid in &rowids {
+    //     eprintln!("[DEBUG] found rowid: {}", rowid);
+    // }
 
     Ok(get_rows_by_rowids(file, page_size, col_idxs, col_types, &rowids, &tinfo)?)
 }
@@ -669,7 +669,7 @@ fn get_cols_data_with_index(file: &mut File, tinfo: &TableInfo, page_size: u16, 
 fn find_index_root_page(tables_info: &[TableInfo], table_name: &str) -> Option<u32> {
     for entry in tables_info {
         if entry.tpe == "index" && entry.tbl_name == table_name {
-            eprintln!("Found index on {} for table: {}", entry.rootpage, table_name);
+            // eprintln!("Found index on {} for table: {}", entry.rootpage, table_name);
             return Some(entry.rootpage);
         }
     }
