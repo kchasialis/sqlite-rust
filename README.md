@@ -1,54 +1,48 @@
-In this challenge, I built a barebones SQLite implementation that supports
-basic SQL queries like `SELECT`.
-I learnt about
-[SQLite's file format](https://www.sqlite.org/fileformat.html), how indexed data
-is
-[stored in B-trees](https://jvns.ca/blog/2014/10/02/how-does-sqlite-work-part-2-btrees/)
-and more
+A minimal SQLite implementation in Rust that parses the SQLite file format and executes basic SQL queries.
 
-1. Ensure you have `cargo (1.91)` installed locally
-1. Run `./your_program.sh` to run your program, which is implemented in
-   `src/main.rs`. This command compiles your Rust project, so it might be slow
-   the first time you run it. Subsequent runs will be fast.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
+Built to learn Rust and understand database internals.
 
-# Sample Databases
+## Features
 
-To make it easy to test queries locally, we've added a sample database in the
-root of this repository: `sample.db`.
+- **File Format Parsing**: Reads SQLite database headers, page structures, and B-tree data
+- **Query Support**:
+  - `SELECT COUNT(*) FROM <table>`
+  - `SELECT <columns> FROM <table>`
+  - `SELECT <columns> FROM <table> WHERE <column> = '<value>'`
+- **Index Optimization**: Automatically uses B-tree indexes for `WHERE` clause filtering when available
+- **Data Types**: Handles INTEGER, TEXT, REAL, and BLOB columns
 
-This contains two tables: `apples` & `oranges`. You can use this to test your
-implementation for the first 6 stages.
+## Running Locally
 
-You can explore this database by running queries against it like this:
-
+Requires `cargo (1.91)` or later.
 ```sh
-$ sqlite3 sample.db "select id, name from apples"
-1|Granny Smith
-2|Fuji
-3|Honeycrisp
-4|Golden Delicious
+./your_program.sh sample.db "SELECT id, name FROM apples"
 ```
 
-There are two other databases that you can use:
+The first run compiles the project and may be slow. Subsequent runs are fast.
 
-1. `superheroes.db`:
-   - This is a small version of the test database used in the table-scan stage.
-   - It contains one table: `superheroes`.
-   - It is ~1MB in size.
-1. `companies.db`:
-   - This is a small version of the test database used in the index-scan stage.
-   - It contains one table: `companies`, and one index: `idx_companies_country`
-   - It is ~7MB in size.
+## Sample Databases
 
-These aren't included in the repository because they're large in size. You can
-download them by running this script:
+**Included:**
+- `sample.db` - Small database with `apples` and `oranges` tables (~few KB)
 
+**Download separately:**
 ```sh
 ./download_sample_databases.sh
 ```
 
-If the script doesn't work for some reason, you can download the databases
-directly from
-[codecrafters-io/sample-sqlite-databases](https://github.com/codecrafters-io/sample-sqlite-databases).
+- `superheroes.db` - 1MB database for testing table scans
+- `companies.db` - 7MB database with an index for testing index scans
+
+Explore databases with:
+```sh
+sqlite3 sample.db "SELECT id, name FROM apples"
+```
+
+## Implementation Notes
+
+Topics explored:
+- [SQLite's file format](https://www.sqlite.org/fileformat.html)
+- [B-tree storage structures](https://jvns.ca/blog/2014/10/02/how-does-sqlite-work-part-2-btrees/)
+- Query optimization with indexes
+- Rust systems programming
