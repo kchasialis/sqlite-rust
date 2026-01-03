@@ -1,10 +1,6 @@
-[![progress-banner](https://backend.codecrafters.io/progress/sqlite/3831e18f-1f11-45c9-bee1-fb22081b2424)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
-
-This is a starting point for Rust solutions to the
-["Build Your Own SQLite" Challenge](https://codecrafters.io/challenges/sqlite).
-
-In this challenge, you'll build a barebones SQLite implementation that supports
-basic SQL queries like `SELECT`. Along the way we'll learn about
+In this challenge, I built a barebones SQLite implementation that supports
+basic SQL queries like `SELECT`.
+In this project, I learnt about
 [SQLite's file format](https://www.sqlite.org/fileformat.html), how indexed data
 is
 [stored in B-trees](https://jvns.ca/blog/2014/10/02/how-does-sqlite-work-part-2-btrees/)
@@ -12,22 +8,6 @@ and more.
 
 **Note**: If you're viewing this repo on GitHub, head over to
 [codecrafters.io](https://codecrafters.io) to try the challenge.
-
-# Passing the first stage
-
-The entry point for your SQLite implementation is in `src/main.rs`. Study and
-uncomment the relevant code, and push your changes to pass the first stage:
-
-```sh
-git commit -am "pass 1st stage" # any msg
-git push origin master
-```
-
-Time to move on to the next stage!
-
-# Stage 2 & beyond
-
-Note: This section is for stages 2 and beyond.
 
 1. Ensure you have `cargo (1.91)` installed locally
 1. Run `./your_program.sh` to run your program, which is implemented in
