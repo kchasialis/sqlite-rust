@@ -75,10 +75,10 @@ impl Column {
 
 struct TableInfo {
     tpe: String,
-    name: String,
     tbl_name: String,
     rootpage: u32,
-    columns: Vec<Column>
+    columns: Vec<Column>,
+    index_col: Option<String>
 }
 
 fn read_varint(data: &[u8]) -> (u64, usize) {
@@ -264,14 +264,20 @@ fn read_tbl_info(file: &mut File, cell_offset: u16) -> Result<TableInfo> {
     let rootpage_int = extract_integer(&record.data[3])? as u32;
     let sql_str = extract_string(&record.data[4]);
 
-    // eprintln!("sql_str: {}", sql_str);
+    let index_col = if type_str == "index" {
+        let index_re = Regex::new(r"(?i)CREATE\s+INDEX\s+\w+\s+on\s+\w+\s*\(\s*(\w+)\s*\)")?;
+        index_re.captures(&sql_str)
+            .map(|caps| caps[1].to_string())
+    } else {
+        None
+    };
 
     Ok(TableInfo {
         tpe: type_str,
-        name: name_str,
         tbl_name: tbl_name_str,
         rootpage: rootpage_int,
-        columns: parse_columns(&sql_str)?
+        columns: parse_columns(&sql_str)?,
+        index_col
     })
 }
 
@@ -659,17 +665,12 @@ fn get_cols_data_with_index(file: &mut File, tinfo: &TableInfo, page_size: u16, 
     let mut rowids: Vec<u64> = vec![];
     get_rowids_index(file, index_rootpage, page_size, index_col, index_val, & mut rowids)?;
 
-    // for rowid in &rowids {
-    //     eprintln!("[DEBUG] found rowid: {}", rowid);
-    // }
-
     Ok(get_rows_by_rowids(file, page_size, col_idxs, col_types, &rowids, &tinfo)?)
 }
 
 fn find_index_root_page(tables_info: &[TableInfo], table_name: &str) -> Option<u32> {
     for entry in tables_info {
         if entry.tpe == "index" && entry.tbl_name == table_name {
-            // eprintln!("Found index on {} for table: {}", entry.rootpage, table_name);
             return Some(entry.rootpage);
         }
     }
@@ -732,7 +733,6 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
         let where_re = Regex::new(r#"(?i)WHERE\s+(\w+)\s*=\s*['"]([^'"]+)['"]"#)?;
         let mut filter_col: Option<usize> = None;
         let mut filter_val: Option<String> = None;
-        let mut use_index = false;
 
         if let Some(caps) = where_re.captures(&args[2]) {
             let col_name = caps[1].to_string();
@@ -741,37 +741,35 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
             for (idx, col) in tinfo.columns.iter().enumerate() {
                 if col.name == col_name {
                     filter_col = Some(idx);
-
-                    if col_name == "country" {
-                        use_index = true;
-                    }
                     break;
                 }
             }
+
+            let index_info = tables_info.iter()
+                .find(|t| t.tpe == "index"
+                    && t.tbl_name == table_name
+                    && t.index_col.as_ref().map_or(false, |c| c.eq_ignore_ascii_case(&col_name)));
+
+            if let Some(index) = index_info {
+                let index_col = tinfo.columns.iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(&col_name))
+                    .ok_or_else(|| anyhow::anyhow!("Column not found"))?;
+
+                let rows = get_cols_data_with_index(&mut file, tinfo, page_size, &col_idxs, &col_types, index.rootpage, index_col, filter_val.as_ref().unwrap())?;
+
+                for row in rows {
+                    println!("{}", row.join("|"));
+                }
+                return Ok(());
+            }
         }
 
-        let mut columns: Vec<Vec<String>>;
-        if use_index {
-            let index_root = find_index_root_page(&tables_info, &table_name)
-                .ok_or_else(|| anyhow::anyhow!("Index not found"))?;
-
-            let index_col = Column {
-                name: "country".to_string(),
-                tpe: SqlType::Text,
-            };
-
-            let rows = get_cols_data_with_index(&mut file, tinfo, page_size, &col_idxs, &col_types, index_root, &index_col, filter_val.unwrap().as_str())?;
-            for row in rows {
-                println!("{}", row.join("|"));
-            }
-        } else {
-            columns = vec![Vec::new(); col_idxs.len()];
-            get_cols_data_with_filter(&mut file, page_size, tinfo.rootpage, &col_idxs, &col_types, &filter_col, &filter_val, &mut columns)?;
-            let n_rows = columns[0].len();
-            for i in 0..n_rows {
-                let row_vec: Vec<&str> = columns.iter().map(|col| col[i].as_str()).collect();
-                println!("{}", row_vec.join("|"));
-            }
+        let mut columns = vec![Vec::new(); col_idxs.len()];
+        get_cols_data_with_filter(&mut file, page_size, tinfo.rootpage, &col_idxs, &col_types, &filter_col, &filter_val, &mut columns)?;
+        let n_rows = columns[0].len();
+        for i in 0..n_rows {
+            let row_vec: Vec<&str> = columns.iter().map(|col| col[i].as_str()).collect();
+            println!("{}", row_vec.join("|"));
         }
 
         return Ok(());
