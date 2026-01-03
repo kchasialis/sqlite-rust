@@ -4,6 +4,15 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use regex::Regex;
 
+struct Column {
+    name: String,
+    tpe: SqlType,
+}
+
+struct Record {
+    data: Vec<Vec<u8>>
+}
+
 #[derive(Debug)]
 enum PageType {
     InteriorIndex = 0x2,
@@ -31,11 +40,6 @@ enum SqlType {
     Real,
     Blob,
     Null,
-}
-
-struct Column {
-    name: String,
-    tpe: SqlType,
 }
 
 impl SqlType {
@@ -116,106 +120,65 @@ fn get_serial_type_size(serial_type: u64) -> usize {
     }
 }
 
-fn extract_integer(buffer: &[u8], offset: usize, serial_type: u64) -> Result<i64> {
-    match serial_type {
+fn extract_integer(buffer: &[u8]) -> Result<i64> {
+    match buffer.len() {
         0 => Ok(0),
-        1 => {
-            if offset >= buffer.len() {
-                bail!("Offset {} out of bounds (buffer len: {})", offset, buffer.len());
-            }
-            Ok(buffer[offset] as i8 as i64)
-        }
+        1 => Ok(buffer[0] as i8 as i64),
         2 => {
-            let bytes: [u8; 2] = buffer[offset..offset + 2]
-                .try_into()
+            let bytes: [u8; 2] = buffer[0..2].try_into()
                 .context("Failed to read 2 bytes")?;
             Ok(i16::from_be_bytes(bytes) as i64)
         }
         3 => {
-            if offset + 3 > buffer.len() {
-                bail!("Not enough bytes for 24-bit integer");
-            }
-            let b1 = buffer[offset] as i32;
-            let b2 = buffer[offset + 1] as i32;
-            let b3 = buffer[offset + 2] as i32;
-
+            let b1 = buffer[0] as i32;
+            let b2 = buffer[1] as i32;
+            let b3 = buffer[2] as i32;
             let mut value = (b1 << 16) | (b2 << 8) | b3;
-
             if value & 0x800000 != 0 {
                 value |= 0xFF000000u32 as i32;
             }
-
             Ok(value as i64)
         }
         4 => {
-            let bytes: [u8; 4] = buffer[offset..offset + 4]
-                .try_into()
+            let bytes: [u8; 4] = buffer[0..4].try_into()
                 .context("Failed to read 4 bytes")?;
             Ok(i32::from_be_bytes(bytes) as i64)
         }
         5 => {
-            if offset + 6 > buffer.len() {
-                bail!("Not enough bytes for 48-bit integer");
-            }
-
             let mut bytes = [0u8; 8];
-            bytes[2..8].copy_from_slice(&buffer[offset..offset + 6]);
-
+            bytes[2..8].copy_from_slice(&buffer);
             let mut value = i64::from_be_bytes(bytes);
-
             if value & 0x800000000000 != 0 {
                 value |= 0xFFFF000000000000u64 as i64;
             }
-
             Ok(value)
         }
         6 => {
-            let bytes: [u8; 8] = buffer[offset..offset + 8]
+            let bytes: [u8; 8] = buffer[0..8]
                 .try_into()
                 .context("Failed to read 8 bytes")?;
             Ok(i64::from_be_bytes(bytes))
         }
-        7 => {
-            // 64-bit IEEE floating point (but you asked for integers)
-            let bytes: [u8; 8] = buffer[offset..offset + 8]
-                .try_into()
-                .context("Failed to read 8 bytes for float")?;
-            let float_val = f64::from_be_bytes(bytes);
-            Ok(float_val as i64)  // Convert to integer (may lose precision)
-        }
         8 => Ok(0),
         9 => Ok(1),
-        _ => bail!("Serial type {} is not an integer type", serial_type),
+        _ => bail!("Invalid buffer length for integer type: {}", buffer.len()),
     }
 }
 
-fn extract_real(buffer: &[u8], offset: usize, serial_type: u64) -> Result<f64> {
-    match serial_type {
-        7 => {
-            let bytes: [u8; 8] = buffer[offset..offset + 8]
+fn extract_real(buffer: &[u8]) -> Result<f64> {
+    match buffer.len() {
+        8 => {
+            let bytes: [u8; 8] = buffer[0..8]
                 .try_into()
                 .context("Failed to read 8 bytes for float")?;
-            let float_val = f64::from_be_bytes(bytes);
-            Ok(float_val)
+            Ok(f64::from_be_bytes(bytes))
         }
-        _ => bail!("Serial type {} is not an integer type", serial_type),
+        _ => bail!("Invalid buffer length for floating type: {}", buffer.len()),
     }
 }
 
-fn extract_string(buffer: &[u8], offset: usize, serial_type: u64) -> String {
-    let size = get_serial_type_size(serial_type);
-
-    if size == 0 {
-        return String::new();
-    }
-
-    if offset + size > buffer.len() {
-        eprintln!("Warning: String exceeds buffer bounds");
-        return String::new();
-    }
-
-    let bytes = &buffer[offset..offset + size];
-    String::from_utf8_lossy(bytes).to_string()
+fn extract_string(buffer: &[u8]) -> String {
+    String::from_utf8_lossy(buffer).to_string()
 }
 
 fn parse_columns(sql_str: &str) -> Result<Vec<Column>> {
@@ -227,11 +190,17 @@ fn parse_columns(sql_str: &str) -> Result<Vec<Column>> {
 
     if let Some(caps) = create_re.captures(sql_str) {
         let cols_section = &caps[1];
-
-        let col_re = Regex::new(r#"(?i)(\w+)\s+(integer|text|real|blob|int|varchar|char|float|double)\b"#)?;
+        let col_re = Regex::new(r#"(?i)(?:"([^"]+)"|(\w+))\s+(integer|text|real|blob|int|varchar|char|float|double)\b"#)?;
 
         let columns: Vec<Column> = col_re.captures_iter(cols_section)
-            .map(|c| Column::from_strs(&c[1], &c[2]))
+            .map(|c| {
+                let name = if let Some(quoted) = c.get(1) {
+                    quoted.as_str()
+                } else {
+                    &c[2]
+                };
+                Column::from_strs(name, &c[3])
+            })
             .collect();
 
         return Ok(columns);
@@ -240,65 +209,60 @@ fn parse_columns(sql_str: &str) -> Result<Vec<Column>> {
     Ok(vec![])
 }
 
-fn get_cell_data(file: &mut File, page_offset: u64, cell_offset: u16) -> Result<(Vec<u64>, u64, Vec<u8>, u64)> {
+fn get_cell_data(file: &mut File, page_offset: u64, cell_offset: u16, index_cell: bool) -> Result<(Record, u64)> {
     let absolute_offset = page_offset + cell_offset as u64;
 
     file.seek(SeekFrom::Start(absolute_offset))?;
-    let mut varint_buffers = [0u8; 18];
-    // file.read_exact(&mut varint_buffers)?;
-    file.read_exact(&mut varint_buffers)
-        .context(format!("Failed to read varint headers at cell offset {} (absolute: {})", cell_offset, absolute_offset))?;
+    let mut payload_size_buf = [0u8; 9];
+    file.read_exact(&mut payload_size_buf)?;
+    let (payload_size, payload_size_bytes) = read_varint(&payload_size_buf);
 
-    let (rec_size, rec_size_bytes) = read_varint(&varint_buffers);
-    let (rowid, rowid_bytes) = read_varint(&varint_buffers[rec_size_bytes..]);
-    let total_bytes = rec_size_bytes + rowid_bytes;
+    let mut rowid = 0;
+    let mut total_header_bytes = payload_size_bytes;
 
-    file.seek(SeekFrom::Start(absolute_offset + total_bytes as u64))?;
+    if !index_cell {
+        file.seek(SeekFrom::Start(absolute_offset + payload_size_bytes as u64))?;
+        let mut rowid_buf = [0u8; 9];
+        file.read_exact(&mut rowid_buf)?;
+        let (rowid_val, rowid_bytes) = read_varint(&rowid_buf);
+        rowid = rowid_val;
+        total_header_bytes += rowid_bytes;
+    }
 
-    let mut record_buffer = vec![0u8; rec_size as usize];
-    // file.read_exact(&mut record_buffer)?;
+    file.seek(SeekFrom::Start(absolute_offset + total_header_bytes as u64))?;
+
+    let mut record_buffer = vec![0u8; payload_size as usize];
     file.read_exact(&mut record_buffer)
-        .context(format!("Failed to read record ({} bytes) at cell offset {} (absolute: {})", rec_size, cell_offset, absolute_offset))?;
+        .context(format!("Failed to read record ({} bytes) at cell offset {}", payload_size, cell_offset))?;
 
     let (header_size, mut header_pos) = read_varint(&record_buffer);
 
-    let mut serial_types = Vec::new();
+    let mut body_offset = header_size as usize;
+    let mut data: Vec<Vec<u8>> = vec![];
+
     while header_pos < header_size as usize {
         let (serial_type, bytes) = read_varint(&record_buffer[header_pos..]);
-        serial_types.push(serial_type);
+        let serial_type_size = get_serial_type_size(serial_type);
+        data.push(Vec::from(&record_buffer[body_offset..body_offset + serial_type_size]));
+        body_offset += serial_type_size;
         header_pos += bytes;
     }
 
-    Ok((serial_types, header_size, record_buffer, rowid))
+    Ok((Record { data }, rowid))
 }
 
 fn read_tbl_info(file: &mut File, cell_offset: u16) -> Result<TableInfo> {
-    let (serial_types, header_size, record_buffer, _) = get_cell_data(file, 0, cell_offset)?;
+    let (record, _) = get_cell_data(file, 0, cell_offset, false)?;
 
-    if serial_types.len() < 5 {
-        bail!("Expected at least 5 columns in sqlite_schema, found {}", serial_types.len());
+    if record.data.len() < 5 {
+        bail!("Expected at least 5 columns in sqlite_schema, found {}", record.data.len());
     }
 
-    let mut body_offset = header_size as usize;
-
-    // Column 0: type (text)
-    let type_str = extract_string(&record_buffer, body_offset, serial_types[0]);
-    body_offset += get_serial_type_size(serial_types[0]);
-
-    // Column 1: name (text)
-    let name_str = extract_string(&record_buffer, body_offset, serial_types[1]);
-    body_offset += get_serial_type_size(serial_types[1]);
-
-    // Column 2: tbl_name (text)
-    let tbl_name_str = extract_string(&record_buffer, body_offset, serial_types[2]);
-    body_offset += get_serial_type_size(serial_types[2]);
-
-    // Column 3: rootpage (integer)
-    let rootpage_int = extract_integer(&record_buffer, body_offset, serial_types[3])? as u32;
-    body_offset += get_serial_type_size(serial_types[3]);
-
-    // Column 4: sql (text)
-    let sql_str = extract_string(&record_buffer, body_offset, serial_types[4]);
+    let type_str = extract_string(&record.data[0]);
+    let name_str = extract_string(&record.data[1]);
+    let tbl_name_str = extract_string(&record.data[2]);
+    let rootpage_int = extract_integer(&record.data[3])? as u32;
+    let sql_str = extract_string(&record.data[4]);
 
     Ok(TableInfo {
         tpe: type_str,
@@ -314,12 +278,10 @@ fn execute_dbinfo_command(args: Vec<String>) -> Result<()> {
     let mut header = [0; 100];
     file.read_exact(&mut header)?;
 
-    // The page size is stored at the 16th byte offset, using 2 bytes in big-endian order
-    #[allow(unused_variables)]
     let page_size: u16 = u16::from_be_bytes([header[16], header[17]]);
 
     let mut page_header = [0; 8];
-    (file).read_exact(&mut page_header)?;
+    file.read_exact(&mut page_header)?;
     let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]);
 
     println!("database page size: {}", page_size);
@@ -332,7 +294,7 @@ fn get_tables_info(file: &mut File) -> Result<Vec<TableInfo>> {
     file.seek(SeekFrom::Start(100))?;
 
     let mut page_header = [0; 8];
-    (file).read_exact(&mut page_header)?;
+    file.read_exact(&mut page_header)?;
     let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]);
 
     let n_bytes = (n_cells * 2) as usize;
@@ -365,9 +327,9 @@ fn execute_tables_command(args: Vec<String>) -> Result<()> {
 fn get_rows_from_leaf_page(file: &mut File, current_page: u32, page_size: u16) -> Result<u64> {
     let page_offset: u64 = (page_size as u32 * (current_page - 1)) as u64;
 
-    (file).seek(SeekFrom::Start(page_offset))?;
+    file.seek(SeekFrom::Start(page_offset))?;
     let mut page_header = [0; 8];
-    (file).read_exact(&mut page_header)?;
+    file.read_exact(&mut page_header)?;
     let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]) as u64;
 
     Ok(n_cells)
@@ -375,34 +337,30 @@ fn get_rows_from_leaf_page(file: &mut File, current_page: u32, page_size: u16) -
 
 fn count_rows_in_page(file: &mut File, current_page: u32, page_size: u16) -> Result<u64> {
     let page_offset: u64 = (page_size as u32 * (current_page - 1)) as u64;
-    (file).seek(SeekFrom::Start(page_offset))?;
+    file.seek(SeekFrom::Start(page_offset))?;
 
     let mut page_type_buf = [0; 1];
-    (file).read_exact(&mut page_type_buf)
+    file.read_exact(&mut page_type_buf)
         .context(format!("Failed to read page type at page {}", current_page))?;
     let page_type_enum = PageType::from_u8(page_type_buf[0])?;
 
     match page_type_enum {
         PageType::InteriorTable => {
-            (file).seek(SeekFrom::Start(page_offset))?;
+            file.seek(SeekFrom::Start(page_offset))?;
             let mut page_header = [0; 12];
-            // (file).read_exact(&mut page_header)?;
-            (file).read_exact(&mut page_header)
+            file.read_exact(&mut page_header)
                 .context(format!("Failed to read page header at interior page {}", current_page))?;
             let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]);
 
-            // eprintln!("[DEBUG] n_cells: {}", n_cells);
-
             let n_bytes = (n_cells * 2) as usize;
             let mut cell_array_contents = vec![0u8; n_bytes];
-            // file.read_exact(&mut cell_array_contents)?;
             file.read_exact(&mut cell_array_contents)
                 .context(format!("Failed to read cell array ({} bytes) at interior page {}", n_bytes, current_page))?;
 
             let mut total_count = 0u64;
             for i in (0..n_bytes).step_by(2) {
                 let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
-                let left_page = extract_page_from_cell(file, page_offset, cell_offset)?;
+                let (left_page, _) = extract_interior_cell_data(file, page_offset, cell_offset, false)?;
                 total_count += count_rows_in_page(file, left_page, page_size)?;
             }
 
@@ -422,22 +380,53 @@ fn get_table_count(file: &mut File, tinfo: &TableInfo, page_size: u16) -> Result
     count_rows_in_page(file, tinfo.rootpage, page_size)
 }
 
-fn get_page_data(file: &mut File, tinfo: &TableInfo, column_name: &String, page_size: u16, filter_vec: Option<&Vec<bool>>, page_num: u32, result_vec: &mut Vec<String>, row_offset: &mut usize) -> Result<()> {
-    let mut col_idx = 0;
-    let mut column_type: SqlType = SqlType::Null;
-    for (idx, col) in tinfo.columns.iter().enumerate() {
-        if col.name.eq(column_name) {
-            column_type = col.tpe;
-            col_idx = idx;
-            break;
-        }
-    }
+fn check_if_primary_key(col: &Column) -> bool {
+    col.tpe == SqlType::Integer && col.name.to_lowercase() == "id"
+}
 
+fn has_integer_primary_key(tinfo: &TableInfo) -> bool {
+    if tinfo.columns.is_empty() {
+        return false;
+    }
+    check_if_primary_key(&tinfo.columns[0])
+}
+
+fn get_record_index(col_idx: usize, tinfo: &TableInfo) -> usize {
+    if has_integer_primary_key(tinfo) && col_idx > 0 {
+        col_idx - 1
+    } else {
+        col_idx
+    }
+}
+
+fn get_col_value(col_idx: usize, tinfo: &TableInfo, col_type: &SqlType, rowid: u64, record: &Record) -> Result<String> {
+    let is_primary_key = check_if_primary_key(&tinfo.columns[col_idx]);
+
+    Ok(if is_primary_key {
+        rowid.to_string()
+    } else {
+        let record_idx = get_record_index(col_idx, tinfo);
+        match col_type {
+            SqlType::Integer => {
+                extract_integer(&record.data[record_idx])?.to_string()
+            }
+            SqlType::Text => {
+                extract_string(&record.data[record_idx])
+            }
+            SqlType::Real => {
+                extract_real(&record.data[record_idx])?.to_string()
+            }
+            _ => bail!("Unsupported data type: {:?}", col_type)
+        }
+    })
+}
+
+fn get_page_data_with_filter(file: &mut File, col_idxs: &Vec<usize>, col_types: &Vec<SqlType>, page_size: u16, page_num: u32, filter_col: &Option<usize>, filter_val: &Option<String>) -> Result<Vec<Vec<String>>> {
     let page_offset: u64 = (page_size as u32 * (page_num - 1)) as u64;
 
-    (file).seek(SeekFrom::Start(page_offset))?;
+    file.seek(SeekFrom::Start(page_offset))?;
     let mut page_header = [0; 8];
-    (file).read_exact(&mut page_header)
+    file.read_exact(&mut page_header)
         .context(format!("Failed to read page header at leaf page {}", page_num))?;
     let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]) as u64;
 
@@ -446,142 +435,293 @@ fn get_page_data(file: &mut File, tinfo: &TableInfo, column_name: &String, page_
     file.read_exact(&mut cell_array_contents)
         .context(format!("Failed to read cell array ({} bytes) at leaf page {}", n_bytes, page_num))?;
 
+    let mut results: Vec<Vec<String>> = vec![Vec::new(); col_idxs.len()];
     for i in (0..n_bytes).step_by(2) {
         let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
-        let (serial_types, header_size, record_buffer, rowid) = get_cell_data(file, page_offset, cell_offset)?;
+        let (record, rowid) = get_cell_data(file, page_offset, cell_offset, false)?;
 
-        let is_primary_key = col_idx == 0 && column_name == "id";
-
-        let value = if is_primary_key {
-            rowid.to_string()
-        } else {
-            let mut body_offset = header_size as usize;
-            for idx in 0..col_idx {
-                body_offset += get_serial_type_size(serial_types[idx]);
+        if let (Some(fcol), Some(fval)) = (filter_col, filter_val) {
+            let record_filter_val = extract_string(&record.data[*fcol]);
+            if !record_filter_val.eq_ignore_ascii_case(fval) {
+                continue;
             }
-
-            match column_type {
-                SqlType::Integer => {
-                    extract_integer(&record_buffer, body_offset, serial_types[col_idx])?
-                        .to_string()
-                }
-                SqlType::Text => {
-                    extract_string(&record_buffer, body_offset, serial_types[col_idx])
-                }
-                SqlType::Real => {
-                    extract_real(&record_buffer, body_offset, serial_types[col_idx])?
-                        .to_string()
-                }
-                _ => bail!("Unsupported data type: {:?}", column_type)
-            }
-        };
-
-        if let Some(vec) = filter_vec {
-            if vec[*row_offset] {
-                result_vec.push(value);
-            }
-        } else {
-            result_vec.push(value);
         }
 
-        *row_offset += 1;
+        for (coli, col_idx) in col_idxs.iter().enumerate() {
+            let value = if *col_idx == 0 && record.data[0].is_empty() {
+                rowid.to_string()
+            } else {
+                let record_idx = *col_idx;
+
+                match &col_types[coli] {
+                    SqlType::Integer => extract_integer(&record.data[record_idx])?.to_string(),
+                    SqlType::Text => extract_string(&record.data[record_idx]),
+                    SqlType::Real => extract_real(&record.data[record_idx])?.to_string(),
+                    _ => bail!("Unsupported data type: {:?}", col_types[coli])
+                }
+            };
+
+            results[coli].push(value);
+        }
     }
 
-    Ok(())
+    Ok(results)
 }
 
-fn extract_page_from_cell(file: &mut File, page_offset: u64, cell_offset: u16) -> Result<u32> {
+fn extract_interior_cell_data(file: &mut File, page_offset: u64, cell_offset: u16, index_cell: bool) -> Result<(u32, u64)> {
     let absolute_offset = page_offset + cell_offset as u64;
     file.seek(SeekFrom::Start(absolute_offset))?;
 
     let mut left_page_buf = [0; 4];
-    // file.read_exact(&mut left_page_buf)?;
     file.read_exact(&mut left_page_buf)
         .context(format!("Failed to read left page pointer at cell offset {} (absolute: {})", cell_offset, absolute_offset))?;
-    let left_page = u32::from_be_bytes([left_page_buf[0], left_page_buf[1], left_page_buf[2], left_page_buf[3]]);
 
-    Ok(left_page)
+    if !index_cell {
+        let mut key_varint_buf = [0; 9];
+        file.read_exact(&mut key_varint_buf)?;
+        return Ok((u32::from_be_bytes(left_page_buf), read_varint(&key_varint_buf).0));
+    }
+
+    Ok((u32::from_be_bytes(left_page_buf), 0u64))
 }
 
-fn get_col_data_with_filter(file: &mut File, tinfo: &TableInfo, column_name: &String, page_size: u16, filter_vec: Option<&Vec<bool>>, current_page: u32, result_vec: &mut Vec<String>, row_offset: &mut usize) -> Result<()> {
+fn get_cols_data_with_filter(file: &mut File, page_size: u16, current_page: u32, col_idxs: &Vec<usize>, col_types: &Vec<SqlType>, filter_col: &Option<usize>, filter_val: &Option<String>, columns: &mut Vec<Vec<String>>) -> Result<()> {
     let page_offset: u64 = (page_size as u32 * (current_page - 1)) as u64;
-    (file).seek(SeekFrom::Start(page_offset))?;
+    file.seek(SeekFrom::Start(page_offset))?;
 
     let mut page_type_buf = [0; 1];
-    (file).read_exact(&mut page_type_buf)
+    file.read_exact(&mut page_type_buf)
         .context(format!("Failed to read page type at page {}", current_page))?;
     let page_type_enum = PageType::from_u8(page_type_buf[0])?;
 
-    // eprintln!("Visting page: {}, type: {:?}", current_page, page_type_enum);
-
     match page_type_enum {
         PageType::InteriorTable => {
-            (file).seek(SeekFrom::Start(page_offset))?;
+            file.seek(SeekFrom::Start(page_offset))?;
             let mut page_header = [0; 12];
-            // (file).read_exact(&mut page_header)?;
-            (file).read_exact(&mut page_header)
+            file.read_exact(&mut page_header)
                 .context(format!("Failed to read page header at interior page {}", current_page))?;
             let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]);
 
-            // eprintln!("n_cells: {}", n_cells);
-
             let n_bytes = (n_cells * 2) as usize;
             let mut cell_array_contents = vec![0u8; n_bytes];
-            // file.read_exact(&mut cell_array_contents)?;
             file.read_exact(&mut cell_array_contents)
                 .context(format!("Failed to read cell array ({} bytes) at interior page {}", n_bytes, current_page))?;
 
             let mut i = 0;
             while i < n_bytes {
                 let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
-                let left_page = extract_page_from_cell(file, page_offset, cell_offset)?;
-                // eprintln!("Recursing for page: {}", left_page);
-                get_col_data_with_filter(file, tinfo, column_name, page_size, filter_vec, left_page, result_vec, row_offset)?;
+                let (left_page, _) = extract_interior_cell_data(file, page_offset, cell_offset, false)?;
+                get_cols_data_with_filter(file, page_size, left_page, col_idxs, col_types, filter_col, filter_val, columns)?;
                 i += 2
             }
 
             let right_page = u32::from_be_bytes([page_header[8], page_header[9], page_header[10], page_header[11]]);
-            get_col_data_with_filter(file, tinfo, column_name, page_size, filter_vec, right_page, result_vec, row_offset)?;
+            get_cols_data_with_filter(file, page_size, right_page, col_idxs, col_types, filter_col, filter_val, columns)?;
 
             Ok(())
         }
         PageType::LeafTable => {
-            get_page_data(file, tinfo, column_name, page_size, filter_vec, current_page, result_vec, row_offset)?;
+            let page_data = get_page_data_with_filter(file, col_idxs, col_types, page_size, current_page, filter_col, filter_val)?;
+            for (col_idx, col_data) in page_data.into_iter().enumerate() {
+                columns[col_idx].extend(col_data);
+            }
             Ok(())
         }
         _ => bail!("Unhandled page type!")
     }
 }
 
-fn get_filter_vec(file: &mut File, tinfo: &TableInfo, query: &str, page_size: u16) -> Result<Vec<bool>> {
-    let where_re = Regex::new(r#"(?i)WHERE\s+(\w+)\s*=\s*['"]([^'"]+)['"]"#)?;
+fn find_child_page_for_rowid(file: &mut File, page_offset: u64, rowid: u64) -> Result<u32> {
+    file.seek(SeekFrom::Start(page_offset))?;
+    let mut page_header = [0; 12];
+    file.read_exact(&mut page_header)?;
+    let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]);
 
-    let n_rows = get_table_count(file, tinfo, page_size)?;
-    let mut filter_vec = vec![true; n_rows as usize];
+    let n_bytes = (n_cells * 2) as usize;
+    let mut cell_array_contents = vec![0u8; n_bytes];
+    file.read_exact(&mut cell_array_contents)?;
 
-    // eprintln!("n_rows of table: {}", n_rows);
-
-    let mut result_vec: Vec<String> = vec![];
-    if let Some(caps) = where_re.captures(query) {
-        let filter_col = caps[1].to_string();
-        let filter_val = caps[2].to_string();
-
-        // eprintln!("[DEBUG] filter_col: {}, filter_val: {}", filter_col, filter_val);
-
-        let mut unqualified_rows_dbg = 0;
-        let mut row_offset = 0;
-        get_col_data_with_filter(file, tinfo, &filter_col.clone(), page_size, None, tinfo.rootpage, &mut result_vec, & mut row_offset)?;
-        for (i, val) in result_vec.iter().enumerate() {
-            if !val.eq(&filter_val) {
-                filter_vec[i] = false;
-                unqualified_rows_dbg += 1;
-            }
+    let mut i = 0;
+    while i < n_bytes {
+        let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
+        let (left_child, cell_key) = extract_interior_cell_data(file, page_offset, cell_offset, false)?;
+        if rowid <= cell_key {
+            return Ok(left_child);
         }
-
-        // eprintln!("[DEBUG] n_rows={}, qualified_rows={}", n_rows, n_rows - unqualified_rows_dbg)
+        i += 2
     }
 
-    Ok(filter_vec)
+    Ok(u32::from_be_bytes([page_header[8], page_header[9], page_header[10], page_header[11]]))
+}
+
+fn find_row_in_leaf(file: &mut File, page_offset: u64, col_idxs: &Vec<usize>, col_types: &Vec<SqlType>, tinfo: &TableInfo, rowid: u64) -> Result<Vec<String>> {
+    file.seek(SeekFrom::Start(page_offset))?;
+    let mut page_header = [0; 8];
+    file.read_exact(&mut page_header)?;
+    let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]) as u64;
+
+    let n_bytes = (n_cells * 2) as usize;
+    let mut cell_array_contents = vec![0u8; n_bytes];
+    file.read_exact(&mut cell_array_contents)?;
+
+    for i in (0..n_bytes).step_by(2) {
+        let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
+
+        let (record, cell_rowid) = get_cell_data(file, page_offset, cell_offset, false)?;
+
+        if cell_rowid == rowid {
+            let mut results: Vec<String> = vec![];
+            for (coli, col_idx) in col_idxs.iter().enumerate() {
+                let value = if *col_idx == 0 && record.data[0].is_empty() {
+                    rowid.to_string()
+                } else {
+                    match &col_types[coli] {
+                        SqlType::Integer => extract_integer(&record.data[*col_idx])?.to_string(),
+                        SqlType::Text => extract_string(&record.data[*col_idx]),
+                        SqlType::Real => extract_real(&record.data[*col_idx])?.to_string(),
+                        _ => bail!("Unsupported data type: {:?}", col_types[coli])
+                    }
+                };
+                results.push(value);
+            }
+            return Ok(results);
+        }
+    }
+
+    bail!("Rowid {} not found in leaf page", rowid)
+}
+
+fn find_row_by_rowid(file: &mut File, curr_page: u32, page_size: u16, col_idxs: &Vec<usize>, col_types: &Vec<SqlType>, tinfo: &TableInfo, rowid: u64) -> Result<Vec<String>> {
+    let page_offset = (page_size as u32 * (curr_page - 1)) as u64;
+    file.seek(SeekFrom::Start(page_offset))?;
+
+    let mut page_type_buf = [0; 1];
+    file.read_exact(&mut page_type_buf)?;
+    let page_type = PageType::from_u8(page_type_buf[0])?;
+
+    match page_type {
+        PageType::InteriorTable => {
+            let child_page = find_child_page_for_rowid(file, page_offset, rowid)?;
+            find_row_by_rowid(file, child_page, page_size, col_idxs, col_types, tinfo, rowid)
+        }
+        PageType::LeafTable => {
+            find_row_in_leaf(file, page_offset, col_idxs, col_types, tinfo, rowid)
+        }
+        _ => bail!("Unexpected page type in table btree")
+    }
+}
+
+fn get_rows_by_rowids(file: &mut File, page_size: u16, col_idxs: &Vec<usize>, col_types: &Vec<SqlType>, rowids: &Vec<u64>, tinfo: &TableInfo) -> Result<Vec<Vec<String>>> {
+    let mut results = Vec::new();
+
+    for &rowid in rowids {
+        let row = find_row_by_rowid(file, tinfo.rootpage, page_size, col_idxs, col_types, tinfo, rowid)?;
+        results.push(row);
+    }
+
+    Ok(results)
+}
+
+fn get_index_page_data(file: &mut File, index_curr_page: u32, page_size: u16, index_col: &Column, index_val: &str) -> Result<Vec<u64>> {
+    let page_offset: u64 = (page_size as u32 * (index_curr_page - 1)) as u64;
+
+    file.seek(SeekFrom::Start(page_offset))?;
+    let mut page_header = [0; 8];
+    file.read_exact(&mut page_header)
+        .context(format!("Failed to read page header at leaf page {}", index_curr_page))?;
+    let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]) as u64;
+
+    let n_bytes = (n_cells * 2) as usize;
+    let mut cell_array_contents = vec![0u8; n_bytes];
+    file.read_exact(&mut cell_array_contents)
+        .context(format!("Failed to read cell array ({} bytes) at leaf page {}", n_bytes, index_curr_page))?;
+
+    let mut result: Vec<u64> = vec![];
+    for i in (0..n_bytes).step_by(2) {
+        let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
+        let (record, _) = get_cell_data(file, page_offset, cell_offset, true)?;
+        let value = match index_col.tpe {
+            SqlType::Integer => {
+                extract_integer(&record.data[0])?.to_string()
+            }
+            SqlType::Text => {
+                extract_string(&record.data[0])
+            }
+            SqlType::Real => {
+                extract_real(&record.data[0])?.to_string()
+            }
+            _ => bail!("Unsupported index data type: {:?}",index_col.tpe)
+        };
+        if value.eq_ignore_ascii_case(index_val) {
+            let rowid = extract_integer(&record.data[1])? as u64;
+            result.push(rowid);
+        }
+    }
+
+    Ok(result)
+}
+
+fn get_rowids_index(file: &mut File, index_curr_page: u32, page_size: u16, index_col: &Column, index_val: &str, rowids: &mut Vec<u64>) -> Result<()> {
+    let page_offset: u64 = (page_size as u32 * (index_curr_page - 1)) as u64;
+    file.seek(SeekFrom::Start(page_offset))?;
+
+    let mut page_type_buf = [0; 1];
+    file.read_exact(&mut page_type_buf)
+        .context(format!("Failed to read page type at index page {}", index_curr_page))?;
+    let page_type_enum = PageType::from_u8(page_type_buf[0])?;
+
+    match page_type_enum {
+        PageType::InteriorIndex => {
+            file.seek(SeekFrom::Start(page_offset))?;
+            let mut page_header = [0; 12];
+            file.read_exact(&mut page_header)
+                .context(format!("Failed to read page header at interior index page {}", index_curr_page))?;
+            let n_cells = u16::from_be_bytes([page_header[3], page_header[4]]);
+
+            let n_bytes = (n_cells * 2) as usize;
+            let mut cell_array_contents = vec![0u8; n_bytes];
+            file.read_exact(&mut cell_array_contents)
+                .context(format!("Failed to read cell array ({} bytes) at interior index page {}", n_bytes, index_curr_page))?;
+
+            let mut i = 0;
+            while i < n_bytes {
+                let cell_offset = u16::from_be_bytes([cell_array_contents[i], cell_array_contents[i + 1]]);
+                let (left_page, _) = extract_interior_cell_data(file, page_offset, cell_offset, true)?;
+                get_rowids_index(file, left_page, page_size, index_col, index_val, rowids)?;
+                i += 2
+            }
+
+            let right_page = u32::from_be_bytes([page_header[8], page_header[9], page_header[10], page_header[11]]);
+            get_rowids_index(file, right_page, page_size, index_col, index_val, rowids)?;
+            Ok(())
+        }
+        PageType::LeafIndex => {
+            let page_rowids = get_index_page_data(file, index_curr_page, page_size, index_col, index_val)?;
+            rowids.extend(page_rowids);
+            Ok(())
+        }
+        _ => bail!("Unhandled page type!")
+    }
+}
+
+fn get_cols_data_with_index(file: &mut File, tinfo: &TableInfo, page_size: u16, col_idxs: &Vec<usize>, col_types: &Vec<SqlType>, index_rootpage: u32, index_col: &Column, index_val: &str) -> Result<Vec<Vec<String>>> {
+    let mut rowids: Vec<u64> = vec![];
+    get_rowids_index(file, index_rootpage, page_size, index_col, index_val, & mut rowids)?;
+
+    for rowid in &rowids {
+        eprintln!("[DEBUG] found rowid: {}", rowid);
+    }
+
+    Ok(get_rows_by_rowids(file, page_size, col_idxs, col_types, &rowids, &tinfo)?)
+}
+
+fn find_index_root_page(tables_info: &[TableInfo], table_name: &str) -> Option<u32> {
+    for entry in tables_info {
+        if entry.tpe == "index" && entry.tbl_name == table_name {
+            return Some(entry.rootpage);
+        }
+    }
+    None
 }
 
 fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
@@ -590,7 +730,6 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
 
     file.seek(SeekFrom::Start(0))?;
     let mut header = [0; 100];
-    // file.read_exact(&mut header)?;
     file.read_exact(&mut header)
         .context("Failed to read database header")?;
 
@@ -616,40 +755,78 @@ fn execute_sql_query_command(args: &Vec<String>) -> Result<()> {
         let cols_str = &caps[1];
         let table_name = caps[2].to_string();
 
+        let tinfo = tables_info
+            .iter()
+            .find(|t| t.tbl_name == table_name)
+            .ok_or_else(|| anyhow::anyhow!("Table '{}' not found", table_name))?;
+
         let col_names: Vec<String> = cols_str
             .split(',')
             .map(|s| s.trim().to_string())
             .collect();
 
-        for tinfo in &tables_info {
-            if tinfo.tbl_name.eq(&table_name) {
-                let filter_vec: Vec<bool> = get_filter_vec(&mut file, tinfo, &args[2], page_size)?;
-
-                let mut results: Vec<Vec<String>> = Vec::new();
-
-                for col in &col_names {
-                    let mut result_vec = Vec::new();
-                    let mut row_offset = 0;
-                    get_col_data_with_filter(&mut file, tinfo, col, page_size, Some(&filter_vec), tinfo.rootpage, &mut result_vec, &mut row_offset)?;
-                    results.push(result_vec);
+        let mut col_idxs: Vec<usize> = vec![];
+        let mut col_types: Vec<SqlType> = vec![];
+        for column_name in &col_names {
+            for (idx, col) in tinfo.columns.iter().enumerate() {
+                if col.name.eq(column_name) {
+                    col_types.push(col.tpe);
+                    col_idxs.push(idx);
+                    break;
                 }
-
-                let n_rows = results[0].len();
-                for i in (0..n_rows) {
-                    let row_vec: Vec<&str> = results.iter().map(|col | col[i].as_str()).collect();
-                    println!("{}", row_vec.join("|"));
-                }
-
-                return Ok(());
             }
         }
+
+        let where_re = Regex::new(r#"(?i)WHERE\s+(\w+)\s*=\s*['"]([^'"]+)['"]"#)?;
+        let mut filter_col: Option<usize> = None;
+        let mut filter_val: Option<String> = None;
+        let mut use_index = false;
+
+        if let Some(caps) = where_re.captures(&args[2]) {
+            let col_name = caps[1].to_string();
+            filter_val = Some(caps[2].to_string());
+
+            for (idx, col) in tinfo.columns.iter().enumerate() {
+                if col.name == col_name {
+                    filter_col = Some(idx);
+
+                    if col_name == "country" {
+                        use_index = true;
+                    }
+                    break;
+                }
+            }
+        }
+
+        let mut columns: Vec<Vec<String>>;
+        if use_index {
+            let index_root = find_index_root_page(&tables_info, &table_name)
+                .ok_or_else(|| anyhow::anyhow!("Index not found"))?;
+
+            let index_col = Column {
+                name: "country".to_string(),
+                tpe: SqlType::Text,
+            };
+
+            columns = get_cols_data_with_index(&mut file, tinfo, page_size, &col_idxs, &col_types, index_root, &index_col, filter_val.unwrap().as_str())?;
+        } else {
+            columns = vec![Vec::new(); col_idxs.len()];
+            get_cols_data_with_filter(&mut file, page_size, tinfo.rootpage, &col_idxs, &col_types, &filter_col, &filter_val, &mut columns)?;
+        }
+
+        let n_rows = columns[0].len();
+        for i in 0..n_rows {
+            let row_vec: Vec<&str> = columns.iter().map(|col| col[i].as_str()).collect();
+            println!("{}", row_vec.join("|"));
+        }
+
+        return Ok(());
     }
 
     bail!("Failed to find table name")
 }
 
 fn main() -> Result<()> {
-    // Parse arguments
     let args = std::env::args().collect::<Vec<_>>();
     match args.len() {
         0 | 1 => bail!("Missing <database path> and <command>"),
@@ -657,7 +834,6 @@ fn main() -> Result<()> {
         _ => {}
     }
 
-    // Parse command and act accordingly
     let command = &args[2];
     match command.as_str() {
         ".dbinfo" => {
